@@ -1,11 +1,14 @@
+import matplotlib
 import numpy as np
 import matplotlib.pyplot as plt
 from scipy.optimize import fsolve
 from datetime import datetime, timedelta
+import matplotlib.dates as mdates
 ##################
-#Data extarction
+#Data extarction section
+
 #Bonds_data
-data = np.loadtxt('bonds.txt', delimiter=",", dtype=str) #xtract data
+data = np.loadtxt('bonds.txt', delimiter=",", dtype=str) #extract data
 BONDS = [] #holds the bonds information
 for line in data:
     bond = {}
@@ -21,23 +24,24 @@ date_strings = ["1/6/2025", "1/7/2025", "1/8/2025", "1/9/2025", "1/10/2025",
                 "1/13/2025", "1/14/2025", "1/15/2025", "1/16/2025", "1/17/2025"]
 days_data = [datetime.strptime(date, "%m/%d/%Y") for date in date_strings]
 
+
 ################
-#Helper functions
+#Helper functions (they will be called later in the code)
 
 def get_paynment_times(price_date, issued, maturity):
     """
     Calculates the dates at which payments must occur for a given bond
 
     Parameters:
-    price_date (datetime): date at which the price was measured
+    price_date (datetime): date at which the price was observed
     issued (datetime): issuing date of the bond
     issued (datetime): maturity date of the bond
 
     Returns:
     days_payment (List[int]): the days at which coupon payments must occur, as a number of days from price date
     coupon_at_maturity (boolean): if there is a coupon at maturity with its full value (true), or its prorated (false)
-    days_since_last_payment (int): number of days from last coupon payment until price_date (for dirty price)
-    days_prorated_coupon (int): if the coupon at maturity its discounted, number of days since last full coupon payment to maturity
+    days_since_last_payment (int): number of days from last coupon payment before price_date (for dirty price)
+    days_irregular_coupon (int): if the coupon at maturity its discounted, number of days since last full coupon payment to maturity
 
     """
     times_for_payment = []
@@ -65,16 +69,16 @@ def get_paynment_times(price_date, issued, maturity):
 
     days_payment = [(day - price_date).days for day in times_for_payment] #transforms the dates to number of days from price_date
 
-    days_since_last_payment = (price_date - last_payment).days #days since the last coupon payment to the date when price was measured
+    days_since_last_payment = (price_date - last_payment).days #days since the last coupon payment before the date when price was observed
 
-    days_prorated_coupon = 0
+    days_irregular_coupon = 0 #irregular coupon
     if not coupon_at_maturity:
-        days_prorated_coupon = (maturity - payment_before_maturity).days #days from the last scheduled coupon payment until maturity
+        days_irregular_coupon = (maturity - payment_before_maturity).days #days from the last scheduled coupon payment until maturity
 
-    return days_payment, coupon_at_maturity, days_since_last_payment, days_prorated_coupon
+    return days_payment, coupon_at_maturity, days_since_last_payment, days_irregular_coupon
 
 
-def present_value(ytm, bond, days, coupon_at_maturity, days_prorated_coupon):
+def present_value(ytm, bond, days, coupon_at_maturity, days_irregular_coupon):
     """
     Calculates the present value at which payments must occur for a given bond
     for ytm calculation.
@@ -82,9 +86,9 @@ def present_value(ytm, bond, days, coupon_at_maturity, days_prorated_coupon):
     Parameters:
     ytm (float): ytm
     bond (dict): the bond we want to calculate
-    days (List[int]): dates at which payments occur
+    days (List[int]): dates at which payments occur for that bond
     coupon_at_maturity [boolean]: if there is a coupon at maturity
-    days_prorated_coupon [int]: number of days between last full coupon and maturity
+    days_irregular_coupon [int]: number of days between last full coupon and maturity
 
     Returns:
     float: present value of the bond assuming ytm
@@ -92,7 +96,7 @@ def present_value(ytm, bond, days, coupon_at_maturity, days_prorated_coupon):
     if coupon_at_maturity: #if last coupon is paid at maturity
         return np.sum(bond["coupon"]/2*np.e**(-ytm*days/365)) + 100*np.e**(-ytm*days[-1]/365)
     else: #if an irregular coupon is paid at maturity
-        return np.sum(bond["coupon"]/2*np.e**(-ytm*days[:len(days)-1]/365)) + 100*np.e**(-ytm*days[-1]/365) + bond["coupon"]*days_prorated_coupon/365*np.e**(-ytm*days[-1]/365)
+        return np.sum(bond["coupon"]/2*np.e**(-ytm*days[:len(days)-1]/365)) + 100*np.e**(-ytm*days[-1]/365) + bond["coupon"]*days_irregular_coupon/365*np.e**(-ytm*days[-1]/365)
 
 
 def dirty_price(data_num, bond, days_since_last):
@@ -118,7 +122,7 @@ def get_r(spot_rates, spot_rates_times, day, today):
 
     Parameters:
     spot_rates (List[float]): list with the already calculated spot rates
-    spot_rates_times (List[datetime]): list with the dates of the spot_rates
+    spot_rates_times (List[datetime]): list with the dates of those spot_rates
     today (datetime): date at which we are analyzing the spot rate data
     day [int]: number of days since today at which we want to obtain the spot rate
 
@@ -146,9 +150,10 @@ def get_fwrd_rates(fw_rates, fw_times):
 
     Parameters:
     fw_rates (List[float]): list with the already calculated forward rates
-    fw_times (List[datetime]): list with the dates of the forward rates
+    fw_times (List[datetime]): list with the dates of those forward rates
+
     Returns:
-    list[float]: rates for 1_1yr, 1_2yr, 1_3yr, 1_4yr
+    list[float]: forward rates for 1_1yr, 1_2yr, 1_3yr, 1_4yr
     """
     index = 3
     fw1_1yr = fw_rates[index-1] + (fw_rates[index]-fw_rates[index-1]) * (datetime(2027, 1, 6)-fw_times[index-1]).days/(fw_times[index]-fw_times[index-1]).days
@@ -159,7 +164,7 @@ def get_fwrd_rates(fw_rates, fw_times):
     return [fw1_1yr, fw1_2yr, fw1_3yr, fw_rates[-1]]
 
 ###############
-#ytm, spot rate and forward rate calculations
+#This part contains the main functions that calculate ytm, spot rate and forward rate
 
 def get_ytm(bonds):
     """
@@ -183,8 +188,8 @@ def get_ytm(bonds):
         yield_day_ytm=[0] #used to store the ytm
 
         for bond in bonds:
-            days, coupon_at_maturity, days_since_last, pro_rate_days = get_paynment_times(today, bond["issue"], bond["maturity"])
-            ytm_solution = fsolve(lambda ytm: present_value(ytm, bond, days, coupon_at_maturity, pro_rate_days) - dirty_price(i, bond, days_since_last), 0.035) #0.035 is the initial guess
+            days, coupon_at_maturity, days_since_last, irregular_coupon_days = get_paynment_times(today, bond["issue"], bond["maturity"])
+            ytm_solution = fsolve(lambda ytm: present_value(ytm, bond, days, coupon_at_maturity, irregular_coupon_days) - dirty_price(i, bond, days_since_last), 0.035) #0.035 is the initial guess
             yield_day_maturities.append(bond["maturity"])
             yield_day_ytm.append(float(ytm_solution)*100)
 
@@ -194,12 +199,12 @@ def get_ytm(bonds):
         yield_day_maturities.append(datetime(2030, 1, 6))
         yield_day_ytm.append(yield_day_ytm[-1]) #interpolate last ytm as the previous calculated
         yield_day_ytm[0] = yield_day_ytm[1] #add the 0 year as the first ytm calculated
-        plt.plot(yield_day_maturities,yield_day_ytm, label=today)
+        plt.plot(yield_day_maturities,yield_day_ytm, label=today.strftime('%d-%b-%Y'))
 
     plt.xlabel("Date")
     plt.ylabel("ytm (%)")
-    plt.title("ytm from 6th January, 5 years forward")
-    plt.legend()
+    plt.title("YTM for different bonds")
+    plt.legend(loc = 'upper right')
     plt.savefig("ytm.png")
     plt.grid()
     plt.show()
@@ -230,9 +235,9 @@ def bootstrap_yield_curve(bonds):
         spot_rates = [0]
         spot_rates_times = [datetime(2025, 1, 6)]
 
-        for i, bond in enumerate(bonds): #getting the bonds at one price ordered by maturity
+        for i, bond in enumerate(bonds): #getting the bonds at one day, ordered by maturity
             coupon_rate = bond["coupon"]
-            days, coupon_at_maturity, days_since_last, pro_rate_days = get_paynment_times(today, bond["issue"], bond["maturity"])
+            days, coupon_at_maturity, days_since_last, irregular_days = get_paynment_times(today, bond["issue"], bond["maturity"])
             price = dirty_price(j, bond, days_since_last)
             for day in days[:len(days)-1]: #discount cashflows (except maturity cashflow)
                 price -= coupon_rate/2*np.e**(-get_r(spot_rates,spot_rates_times,day,today)*day/365)
@@ -241,7 +246,7 @@ def bootstrap_yield_curve(bonds):
                 spot_rates.append((np.log(coupon_rate/2 + 100) - np.log(price))/days[-1] * 365)
                 spot_rates_times.append(bond["maturity"])
             else:
-                spot_rates.append((np.log(100 + coupon_rate*pro_rate_days/365) - np.log(price))/days[-1] * 365)
+                spot_rates.append((np.log(100 + coupon_rate*irregular_days/365) - np.log(price))/days[-1] * 365)
                 spot_rates_times.append(bond["maturity"])
             if i == 0:
                 spot_rates[0] = spot_rates[1]
@@ -249,14 +254,23 @@ def bootstrap_yield_curve(bonds):
         #data saving and plotting
         spot_rates_all.append(spot_rates[1:])
         spot_rates_times_all.append(spot_rates_times[1:])
-        spot_rates[-1] = spot_rates[-2]
-        spot_rates_times[-1] = datetime(2030, 1, 6)
+        spot_rates.append(spot_rates[-1])
+        spot_rates_times.append(datetime(2030, 1, 6))
         spot_rates_percentage = [rate * 100 for rate in spot_rates]
-        plt.plot(spot_rates_times[2:],spot_rates_percentage[2:], label=today) #only bonds 1year forward are plotted
+        index = 3
+        spot_rate_1_year = spot_rates[index-1] + (spot_rates[index]-spot_rates[index-1]) * (datetime(2026, 1, 6)-spot_rates_times[index-1]).days/(spot_rates_times[index]-spot_rates_times[index-1]).days
+        spot_plot_time = spot_rates_times[2:].copy()
+        spot_plot = spot_rates_percentage[2:].copy()
+        spot_plot_time[0] = datetime(2026, 1, 6)
+        spot_plot[0] = spot_rate_1_year*100
+        plt.plot(spot_plot_time,spot_plot, label=today.strftime('%d-%b-%Y')) #only bonds 1year forward are plotted
+
     plt.xlabel("Date")
-    plt.ylabel("ytm (%)")
-    plt.title("Spot rate starting 6th January calculation")
-    plt.legend()
+    plt.ylabel("Spot rate (%)")
+    plt.legend(loc = 'upper right')
+    plt.gca().xaxis.set_major_locator(mdates.YearLocator())
+    plt.gca().xaxis.set_major_formatter(mdates.DateFormatter('%Y'))
+    plt.title("Spot rates for different dates")
     plt.savefig("Yield_curve.png")
     plt.grid()
     plt.show()
@@ -298,13 +312,15 @@ def get_forward_rates(spot_rates_all, spot_rates_times_all):
         forward_rate.append(forward_rate[-1])
         forward_rate_times.append(datetime(2030, 1, 6))
         forward_rate_percentage = [rate * 100 for rate in forward_rate]
-        plt.plot(forward_rate_times,forward_rate_percentage, label=today)
+        plt.plot(forward_rate_times,forward_rate_percentage, label=today.strftime('%d-%b-%Y'))
         forward_rates_all.append(forward_rate.copy())
         forward_rates_times_all.append(forward_rate_times.copy())
 
     plt.xlabel("Date")
     plt.ylabel("Forward rate (%)")
-    plt.title("Forward from 6th January 2026, 4 years forward")
+    plt.title("Forward rate from 6th January 2026, 4 years forward")
+    plt.gca().xaxis.set_major_locator(mdates.YearLocator())
+    plt.gca().xaxis.set_major_formatter(mdates.DateFormatter('%Y'))
     plt.legend()
     plt.savefig("Forward_rate.png")
     plt.grid()
@@ -339,9 +355,8 @@ for i in range(4):
     for j in range(len(days_data)-1):
         f_i_j[i][j] = np.log(forward_rates[j+1][i]/forward_rates[j][i])
 cov_log_fw = np.cov(f_i_j, rowvar=True) #covariance between yields
-gir
 #Eigenvalue and eigenvectors
-print("\nCovariance for yields daily log-returns \n")locals()
+print("\nCovariance for yields daily log-returns \n")
 print(cov_log_yields)
 eigenvalue_yield, eigenvector_yield = np.linalg.eig(cov_log_yields)
 print("\neigenvectors")
